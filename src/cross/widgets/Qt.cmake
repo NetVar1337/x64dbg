@@ -36,7 +36,6 @@ message(STATUS "Found ${QT_PACKAGE}: ${${QT_PACKAGE}_DIR}")
 # https://stackoverflow.com/a/41199492/1806760
 # TODO: set VCINSTALLDIR environment variable
 # TODO: move to a custom target you can trigger manually
-# TODO: support macdeployqt
 if(${QT_PACKAGE}_FOUND AND WIN32 AND TARGET ${QT_PACKAGE}::qmake AND NOT TARGET ${QT_PACKAGE}::windeployqt)
     get_target_property(_qt_qmake_location ${QT_PACKAGE}::qmake IMPORTED_LOCATION)
 
@@ -56,6 +55,19 @@ if(${QT_PACKAGE}_FOUND AND WIN32 AND TARGET ${QT_PACKAGE}::qmake AND NOT TARGET 
             IMPORTED_LOCATION ${imported_location}
         )
     endif()
+endif()
+
+if(APPLE)
+    # macdeployqt copies the Qt frameworks into every bundle, too slow to run on every dev build
+    option(X64DBG_MACDEPLOYQT "Run macdeployqt after building each app bundle" OFF)
+
+    # Bundle icons have to be .icns, so convert the PNG with the system's sips
+    set(QT_BUNDLE_ICON "${CMAKE_CURRENT_BINARY_DIR}/x64dbg.icns")
+    execute_process(
+        COMMAND sips -s format icns "${CMAKE_CURRENT_LIST_DIR}/../../bug_black_outline.png" --out "${QT_BUNDLE_ICON}"
+        OUTPUT_QUIET
+        COMMAND_ERROR_IS_FATAL ANY
+    )
 endif()
 
 function(qt_executable tgt)
@@ -93,6 +105,30 @@ function(qt_executable tgt)
                 COMMENT "Running windeployqt on ${tgt}..."
             )
             set_property(GLOBAL APPEND PROPERTY X64DBG_QT_DEPLOYED_DIRS "${_qt_runtime_output_dir}")
+        endif()
+    endif()
+
+    if(APPLE)
+        # Bundle identifiers may only contain letters, digits, '-' and '.'
+        string(REPLACE "_" "-" _qt_bundle_id "${tgt}")
+        set_target_properties(${tgt} PROPERTIES
+            MACOSX_BUNDLE ON
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Info.plist.in"
+            MACOSX_BUNDLE_BUNDLE_NAME "${tgt}"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "com.x64dbg.${_qt_bundle_id}"
+            MACOSX_BUNDLE_ICON_FILE x64dbg.icns
+        )
+        target_sources(${tgt} PRIVATE "${QT_BUNDLE_ICON}")
+        set_source_files_properties("${QT_BUNDLE_ICON}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+
+        # Make the bundle self-contained, then ad-hoc sign it so it runs on Apple Silicon.
+        # macdeployqt's own signing ignores codesign errors, so it is disabled.
+        if(X64DBG_MACDEPLOYQT AND TARGET ${QT_PACKAGE}::macdeployqt)
+            add_custom_command(TARGET ${tgt} POST_BUILD
+                COMMAND ${QT_PACKAGE}::macdeployqt "$<TARGET_BUNDLE_DIR:${tgt}>" -no-codesign
+                COMMAND codesign --force --deep -s - "$<TARGET_BUNDLE_DIR:${tgt}>"
+                COMMENT "Running macdeployqt on ${tgt}..."
+            )
         endif()
     endif()
 endfunction()
