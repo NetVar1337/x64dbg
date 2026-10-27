@@ -81,3 +81,103 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 1
+
+  macos-bundle:
+    # Skip building pull requests from the same repository
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository }}
+    runs-on: macos-latest
+    env:
+      # Developer ID signing and notarization only run when the secrets are configured
+      MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4.3.1
+        with:
+          cache: true
+          version: 6.11.3
+          modules: qtwebsockets
+
+      - name: Build app bundles
+        run: |
+          cd src/cross
+          # Universal binaries for the oldest macOS that Qt 6.11 supports
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_UNITY_BUILD=ON "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DX64DBG_MACDEPLOYQT=ON
+          cmake --build build --target hex_viewer minidump remote_table
+          mkdir dist
+          mv build/hex_viewer.app build/minidump.app build/remote_table.app dist/
+
+      - name: Sign and notarize
+        if: ${{ env.MACOS_SIGNING == 'true' }}
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "" "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          cd src/cross/dist
+          for app in *.app; do
+            codesign --force --deep --options runtime --timestamp -s "Developer ID Application" "$app"
+          done
+          ditto -c -k . "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          for app in *.app; do
+            xcrun stapler staple "$app"
+          done
+
+      - name: Package app bundles
+        run: ditto -c -k src/cross/dist x64dbg-macos.zip
+
+      - name: Verify app bundles
+        run: |
+          ditto -x -k x64dbg-macos.zip "$RUNNER_TEMP/verify"
+          cd "$RUNNER_TEMP/verify"
+          for app in hex_viewer minidump remote_table; do
+            lipo -info "$app.app/Contents/MacOS/$app"
+            lipo "$app.app/Contents/MacOS/$app" -verify_arch arm64 x86_64
+            codesign --verify --deep --strict --verbose=2 "$app.app"
+            otool -L "$app.app/Contents/MacOS/$app"
+            # otool -l also covers LC_RPATH, which otool -L does not print
+            if find "$app.app" -type f -exec otool -l {} + 2>/dev/null | grep -F "$QT_ROOT_DIR"; then
+              echo "::error::$app.app references the Qt install at $QT_ROOT_DIR"
+              exit 1
+            fi
+          done
+          # macdeployqt skips the offscreen platform plugin, so add it to this test copy only and
+          # re-sign it ad-hoc, because a hardened runtime refuses plugins signed by another team
+          for app in hex_viewer minidump remote_table; do
+            cp "$QT_ROOT_DIR/plugins/platforms/libqoffscreen.dylib" "$app.app/Contents/PlugIns/platforms/"
+            codesign --force --deep -s - "$app.app"
+          done
+          # Hide the Qt install so the apps can only load what is in their bundle
+          mv "$QT_ROOT_DIR" "$QT_ROOT_DIR.hidden"
+          trap 'mv "$QT_ROOT_DIR.hidden" "$QT_ROOT_DIR"' EXIT
+          for app in hex_viewer minidump remote_table; do
+            for arch in arm64 x86_64; do
+              QT_QPA_PLATFORM=offscreen arch -$arch "$app.app/Contents/MacOS/$app" &
+              sleep 5
+              kill $! # fails if the app already exited
+              echo "$app ($arch) was still running after 5 seconds"
+            done
+          done
+
+      - name: Upload app bundles
+        uses: actions/upload-artifact@v7
+        with:
+          path: x64dbg-macos.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
