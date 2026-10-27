@@ -87,6 +87,7 @@ namespace MachBug
             std::lock_guard lock(mStateMutex);
             if(tid != 0)
                 mCurrentTid = tid;
+            ++mStopCount;
         }
         std::lock_guard lock(mCommandMutex);
         mCommand = Command::None;

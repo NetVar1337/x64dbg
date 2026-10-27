@@ -53,6 +53,7 @@ set(MachBug_tests_SOURCES
 	test_attach.cpp
 	test_breakpoints.cpp
 	test_lifecycle.cpp
+	test_modules.cpp
 	test_signals.cpp
 	test_stepping.cpp
 	test_threads.cpp
@@ -93,6 +94,7 @@ list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
 catch_discover_tests(MachBug_tests)
 add_dependencies(MachBug_tests
+    machbug_fixture_dlopen_target
     machbug_fixture_step_over_target
     machbug_fixture_attach_target
     machbug_fixture_exit_code_42
@@ -412,4 +414,32 @@ set_target_properties(machbug_fixture_step_over_target PROPERTIES
 get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
 if(NOT CMKR_VS_STARTUP_PROJECT)
 	set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT machbug_fixture_step_over_target)
+endif()
+
+# Target: machbug_fixture_dlopen_target
+set(machbug_fixture_dlopen_target_SOURCES
+	cmake.toml
+	"targets/dlopen_target.c"
+)
+
+add_executable(machbug_fixture_dlopen_target)
+
+target_sources(machbug_fixture_dlopen_target PRIVATE ${machbug_fixture_dlopen_target_SOURCES})
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${machbug_fixture_dlopen_target_SOURCES})
+
+target_compile_options(machbug_fixture_dlopen_target PRIVATE
+	-g
+	-O0
+)
+
+set_target_properties(machbug_fixture_dlopen_target PROPERTIES
+	OUTPUT_NAME
+		dlopen_target
+	RUNTIME_OUTPUT_DIRECTORY
+		"${CMAKE_BINARY_DIR}/tests/targets"
+)
+
+get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+if(NOT CMKR_VS_STARTUP_PROJECT)
+	set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT machbug_fixture_dlopen_target)
 endif()

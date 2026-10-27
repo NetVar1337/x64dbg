@@ -23,6 +23,7 @@ sources = [
     "test_attach.cpp",
     "test_breakpoints.cpp",
     "test_lifecycle.cpp",
+    "test_modules.cpp",
     "test_signals.cpp",
     "test_stepping.cpp",
     "test_threads.cpp",
@@ -42,6 +43,7 @@ list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
 catch_discover_tests(MachBug_tests)
 add_dependencies(MachBug_tests
+    machbug_fixture_dlopen_target
     machbug_fixture_step_over_target
     machbug_fixture_attach_target
     machbug_fixture_exit_code_42
@@ -124,4 +126,10 @@ properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
 type = "machbug_fixture"
 sources = ["targets/step_over_target.c"]
 properties.OUTPUT_NAME = "step_over_target"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_dlopen_target]
+type = "machbug_fixture"
+sources = ["targets/dlopen_target.c"]
+properties.OUTPUT_NAME = "dlopen_target"
 properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"

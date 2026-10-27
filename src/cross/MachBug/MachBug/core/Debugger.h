@@ -1,6 +1,7 @@
 #pragma once
 
 #include <MachBug/core/ExceptionMessage.h>
+#include <MachBug/process/Image.h>
 #include <MachBug/process/Memory.h>
 #include <MachBug/thread/Arch.h>
 #include <MachBug/thread/Step.h>
@@ -56,6 +57,10 @@ namespace MachBug
         bool MemRead(ptr address, void* dest, size_t size) const;
         bool MemWrite(ptr address, const void* src, size_t size);
         [[nodiscard]] std::vector<MemoryRegion> MemoryMap() const;
+
+        // Loaded images as of the last stop.
+        [[nodiscard]] std::vector<Module> Modules() const;
+        bool ModuleFromAddress(ptr address, Module & module) const;
 
         bool SetBreakpoint(ptr address);
         bool DeleteBreakpoint(ptr address);
@@ -191,6 +196,10 @@ namespace MachBug
         std::vector<Thread> mThreads;
         uint64_t mCurrentTid = 0;
         std::map<ptr, Breakpoint> mBreakpoints;
+        // Read again on the first lookup after each stop.
+        uint64_t mStopCount = 0;
+        mutable std::vector<Module> mModules;
+        mutable uint64_t mModulesStop = 0;
 
         std::optional<PendingReply> mPending;
         // Requests from other threads that arrived while one thread was stepping off a breakpoint.

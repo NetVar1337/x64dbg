@@ -301,6 +301,9 @@ namespace MachBug
         mStepTid = 0;
         mStepOver.reset();
         mPushFlagsTid = 0;
+        mModules.clear();
+        mStopCount = 0;
+        mModulesStop = 0;
         mNextThreadNumber = 0;
         mAwaitingAttachStop = false;
         mLaunched = false;
@@ -481,6 +484,30 @@ namespace MachBug
         if(mTask == MACH_PORT_NULL)
             return {};
         return ReadMemoryMap(mTask);
+    }
+
+    std::vector<Module> Debugger::Modules() const
+    {
+        std::lock_guard lock(mStateMutex);
+        if(mTask != MACH_PORT_NULL && mModulesStop != mStopCount)
+        {
+            mModules = ReadModules(mTask, Pid(), mModules);
+            mModulesStop = mStopCount;
+        }
+        return mModules;
+    }
+
+    bool Debugger::ModuleFromAddress(const ptr address, Module & module) const
+    {
+        for(auto & candidate : Modules())
+        {
+            if(candidate.Contains(address))
+            {
+                module = std::move(candidate);
+                return true;
+            }
+        }
+        return false;
     }
 
     bool Debugger::SetBreakpoint(const ptr address)
