@@ -3,6 +3,7 @@
 #include <MachBug/core/ExceptionMessage.h>
 #include <MachBug/process/Memory.h>
 #include <MachBug/thread/Arch.h>
+#include <MachBug/thread/Step.h>
 #include <mach/mach.h>
 #include <sys/types.h>
 #include <array>
@@ -33,6 +34,7 @@ namespace MachBug
         void Start();    // Blocks - runs the debug loop until the process is gone or detached
         void Continue(); // Thread-safe
         void StepInto(); // Thread-safe
+        void StepOver(); // Thread-safe
         void Pause();    // Thread-safe
         bool Stop();     // Thread-safe
         bool Detach();   // Thread-safe
@@ -85,6 +87,7 @@ namespace MachBug
         struct Breakpoint
         {
             std::array<uint8_t, kBreakpointSize> original = {};
+            bool user = true; // false when only a step over put it there
         };
 
         enum class Command
@@ -92,6 +95,7 @@ namespace MachBug
             None,
             Continue,
             StepInto,
+            StepOver,
             Stop,
             Detach,
         };
@@ -130,7 +134,11 @@ namespace MachBug
         void resumeSilently(ExceptionMessage & message, int signal = 0);
         bool threadAlive(uint64_t tid);
         Command waitForCommand();
-        void resume(bool step);
+        void resume(Command command);
+        void runThread(uint64_t tid, bool step);
+        StepKind classifyAt(ptr pc, ptr & next) const;
+        void cancelStepOver();
+        void maskPushedTrapFlag(thread_act_t thread);
         void finishStepOff();
         void replyPending();
         void killProcess();
@@ -189,6 +197,15 @@ namespace MachBug
         std::deque<ExceptionMessage> mQueued;
         std::optional<StepOff> mStepOff;
         uint64_t mStepTid = 0;
+        // Runs the stepping thread to address; deeper frames and other threads pass through it.
+        struct StepOverRequest
+        {
+            uint64_t tid = 0;
+            ptr address = 0;
+            ptr stackFloor = 0;
+        };
+        std::optional<StepOverRequest> mStepOver;
+        uint64_t mPushFlagsTid = 0;
         // A fault passed on to the process comes back as this signal; it is delivered unreported.
         std::map<uint64_t, int> mForwardedSignals;
 

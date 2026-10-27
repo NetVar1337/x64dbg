@@ -299,6 +299,8 @@ namespace MachBug
         mBreakpoints.clear();
         mCurrentTid = 0;
         mStepTid = 0;
+        mStepOver.reset();
+        mPushFlagsTid = 0;
         mNextThreadNumber = 0;
         mAwaitingAttachStop = false;
         mLaunched = false;
@@ -340,6 +342,15 @@ namespace MachBug
         if(!mPaused.load(std::memory_order_acquire))
             return;
         mCommand = Command::StepInto;
+        mCommandCv.notify_all();
+    }
+
+    void Debugger::StepOver()
+    {
+        std::lock_guard lock(mCommandMutex);
+        if(!mPaused.load(std::memory_order_acquire))
+            return;
+        mCommand = Command::StepOver;
         mCommandCv.notify_all();
     }
 
@@ -477,8 +488,12 @@ namespace MachBug
         std::lock_guard lock(mStateMutex);
         if(mTask == MACH_PORT_NULL || address % kBreakpointSize != 0)
             return false;
-        if(mBreakpoints.count(address))
+        const auto existing = mBreakpoints.find(address);
+        if(existing != mBreakpoints.end())
+        {
+            existing->second.user = true;
             return true;
+        }
 
         Breakpoint bp;
         if(!ReadMemory(mTask, address, bp.original.data(), kBreakpointSize) ||
@@ -492,8 +507,14 @@ namespace MachBug
     {
         std::lock_guard lock(mStateMutex);
         const auto it = mBreakpoints.find(address);
-        if(it == mBreakpoints.end())
+        if(it == mBreakpoints.end() || !it->second.user)
             return false;
+        // A pending step over still needs the trap there.
+        if(mStepOver && mStepOver->address == address)
+        {
+            it->second.user = false;
+            return true;
+        }
         if(mTask != MACH_PORT_NULL && !WriteMemory(mTask, address, it->second.original.data(), kBreakpointSize))
             return false;
         mBreakpoints.erase(it);
@@ -503,7 +524,8 @@ namespace MachBug
     bool Debugger::HasBreakpoint(const ptr address) const
     {
         std::lock_guard lock(mStateMutex);
-        return mBreakpoints.count(address) != 0;
+        const auto it = mBreakpoints.find(address);
+        return it != mBreakpoints.end() && it->second.user;
     }
 
     // Mach has no thread-creation event, so threads are discovered at each stop.

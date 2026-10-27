@@ -388,6 +388,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Darwin") # macos
 		"MachBug/MachBug/process/ProcessList.h"
 		"MachBug/MachBug/thread/Arch.cpp"
 		"MachBug/MachBug/thread/Arch.h"
+		"MachBug/MachBug/thread/Step.cpp"
+		"MachBug/MachBug/thread/Step.h"
 		cmake.toml
 	)
 
@@ -402,6 +404,10 @@ if(CMAKE_SYSTEM_NAME MATCHES "Darwin") # macos
 
 	target_include_directories(MachBug PUBLIC
 		MachBug
+	)
+
+	target_link_libraries(MachBug PUBLIC
+		zydis_wrapper
 	)
 
 endif()

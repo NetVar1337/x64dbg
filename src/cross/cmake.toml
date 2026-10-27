@@ -139,6 +139,7 @@ sources = ["MachBug/MachBug/**.cpp"]
 headers = ["MachBug/MachBug/**.h"]
 compile-features = ["cxx_std_20"]
 include-directories = ["MachBug"]
+link-libraries = ["zydis_wrapper"]
 
 [subdir."MachBug/tests"]
 condition = "machbug-tests"

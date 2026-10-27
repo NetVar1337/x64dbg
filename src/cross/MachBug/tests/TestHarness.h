@@ -99,6 +99,12 @@ namespace MachBug::test
             return WaitFor({type}, timeout);
         }
 
+        std::vector<Event> Events() const
+        {
+            std::lock_guard lock(mMutex);
+            return mEvents;
+        }
+
         size_t Count(const EventType type) const
         {
             std::lock_guard lock(mMutex);
@@ -165,12 +171,12 @@ namespace MachBug::test
 
         void cbBreakpoint(const ptr address) override
         {
-            record({EventType::Breakpoint, 0, address, 0, Pc()});
+            record({EventType::Breakpoint, 0, address, CurrentThreadId(), Pc()});
         }
 
         void cbStep() override
         {
-            record({EventType::Step, 0, 0, 0, Pc()});
+            record({EventType::Step, 0, 0, CurrentThreadId(), Pc()});
         }
 
         void cbPaused() override

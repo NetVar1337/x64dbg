@@ -2,6 +2,7 @@
 #include <MachBug/process/Image.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
@@ -57,7 +58,7 @@ namespace MachBug
             if(command == Command::Stop)
                 killProcess();
             else
-                resume(command == Command::StepInto);
+                resume(command);
         }
     }
 
@@ -80,6 +81,8 @@ namespace MachBug
 
     void Debugger::stopAt(const uint64_t tid)
     {
+        // Any reported stop ends a step over, as in x64dbg.
+        cancelStepOver();
         {
             std::lock_guard lock(mStateMutex);
             if(tid != 0)
@@ -127,7 +130,8 @@ namespace MachBug
                 return true;
             }
 
-            if(!mKilled && mPauseRequested.exchange(false, std::memory_order_acq_rel))
+            // A pause waits for a step-off to finish: the other threads are held during it.
+            if(!mKilled && !mStepOff && mPauseRequested.exchange(false, std::memory_order_acq_rel))
             {
                 suspendTask();
                 return true;
@@ -188,6 +192,13 @@ namespace MachBug
             mQueued.push_back(message);
             resumeTask();
             return false;
+        }
+
+        if(mPushFlagsTid == tid)
+        {
+            if(message.exception == EXC_BREAKPOINT && IsSingleStepTrap(message.code, message.codeCount))
+                maskPushedTrapFlag(message.thread);
+            mPushFlagsTid = 0;
         }
 
         if(mStepOff)
@@ -267,14 +278,34 @@ namespace MachBug
         if(!singleStep && ReadThreadState(message.thread, state))
         {
             const ptr address = TrapAddress(GetPc(state));
-            if(HasBreakpoint(address))
+            bool known = false;
+            bool user = false;
+            {
+                std::lock_guard lock(mStateMutex);
+                const auto it = mBreakpoints.find(address);
+                known = it != mBreakpoints.end();
+                user = known && it->second.user;
+            }
+            if(known)
             {
                 SetPc(state, address);
                 WriteThreadState(message.thread, state);
                 mPending = PendingReply{message};
-                stopAt(tid);
-                cbBreakpoint(address);
-                return true;
+                if(mStepOver && mStepOver->address == address && mStepOver->tid == tid && GetSp(state) >= mStepOver->stackFloor)
+                {
+                    stopAt(tid);
+                    cbStep();
+                    return true;
+                }
+                if(user)
+                {
+                    stopAt(tid);
+                    cbBreakpoint(address);
+                    return true;
+                }
+                // Another thread or a deeper frame reached the step-over target: let it through.
+                runThread(tid, false);
+                return false;
             }
 
             // The breakpoint was deleted while this request waited: run the original code.
@@ -311,20 +342,63 @@ namespace MachBug
         resumeTask();
     }
 
-    void Debugger::resume(const bool step)
+    void Debugger::resume(const Command command)
     {
         uint64_t tid = 0;
+        ThreadState state = {};
+        {
+            std::lock_guard lock(mStateMutex);
+            const Thread* thread = findThread(mCurrentTid);
+            if(thread && ReadThreadState(thread->port, state))
+                tid = thread->tid;
+        }
+
+        bool step = command == Command::StepInto;
+        ptr next = 0;
+        if(tid != 0 && command == Command::StepOver)
+        {
+            const StepKind kind = classifyAt(GetPc(state), next);
+            step = true;
+            if(kind == StepKind::Call || kind == StepKind::Repeat)
+            {
+                std::lock_guard lock(mStateMutex);
+                bool planted = mBreakpoints.count(next) != 0;
+                if(!planted)
+                {
+                    Breakpoint bp;
+                    bp.user = false;
+                    planted = ReadMemory(mTask, next, bp.original.data(), kBreakpointSize) &&
+                              WriteMemory(mTask, next, kBreakpointOpcode, kBreakpointSize);
+                    if(planted)
+                        mBreakpoints.emplace(next, bp);
+                }
+                if(planted)
+                {
+                    mStepOver = StepOverRequest{tid, next, GetSp(state)};
+                    step = false;
+                }
+            }
+        }
+        mStepTid = step ? tid : 0;
+        runThread(tid, step);
+    }
+
+    // Lets the task run. tid first steps off a breakpoint under its pc, and is single-stepped if step.
+    void Debugger::runThread(const uint64_t tid, const bool step)
+    {
         thread_act_t port = MACH_PORT_NULL;
+        ptr pc = 0;
         std::optional<ptr> breakpoint;
         {
             std::lock_guard lock(mStateMutex);
-            if(const Thread* thread = findThread(mCurrentTid))
+            if(const Thread* thread = findThread(tid))
             {
-                tid = thread->tid;
                 port = thread->port;
                 ThreadState state = {};
-                if(ReadThreadState(port, state) && mBreakpoints.count(GetPc(state)))
-                    breakpoint = GetPc(state);
+                if(ReadThreadState(port, state))
+                    pc = GetPc(state);
+                if(pc != 0 && mBreakpoints.count(pc))
+                    breakpoint = pc;
             }
 
             if(breakpoint)
@@ -351,10 +425,62 @@ namespace MachBug
         }
 
         if(port != MACH_PORT_NULL && (breakpoint || step))
+        {
             SetSingleStep(port, true);
-        mStepTid = step ? tid : 0;
+            ptr next = 0;
+            if(classifyAt(pc, next) == StepKind::PushFlags)
+                mPushFlagsTid = tid;
+        }
         replyPending();
         resumeTask();
+    }
+
+    StepKind Debugger::classifyAt(const ptr pc, ptr & next) const
+    {
+        uint8_t bytes[kMaxInstructionSize] = {};
+        size_t size = sizeof(bytes);
+        // An instruction at the end of a mapping is followed by fewer readable bytes.
+        if(!MemRead(pc, bytes, size))
+        {
+            size = std::min<size_t>(size, vm_page_size - (pc & (vm_page_size - 1)));
+            if(!MemRead(pc, bytes, size))
+            {
+                next = 0;
+                return StepKind::Plain;
+            }
+        }
+        return ClassifyStep(bytes, size, pc, next);
+    }
+
+    void Debugger::cancelStepOver()
+    {
+        if(!mStepOver)
+            return;
+        std::lock_guard lock(mStateMutex);
+        const auto it = mBreakpoints.find(mStepOver->address);
+        if(it != mBreakpoints.end() && !it->second.user)
+        {
+            // A thread stepping off it already has the original code mapped.
+            if(!mStepOff || mStepOff->address != it->first)
+                WriteMemory(mTask, it->first, it->second.original.data(), kBreakpointSize);
+            mBreakpoints.erase(it);
+        }
+        mStepOver.reset();
+    }
+
+    // A single-stepped pushf pushes the trap flag too; a later popf would trap on it.
+    void Debugger::maskPushedTrapFlag(const thread_act_t thread)
+    {
+#if defined(__x86_64__)
+        ThreadState state = {};
+        uint8_t flagsHigh = 0; // the trap flag is bit 8: bit 0 of the second pushed byte
+        if(!ReadThreadState(thread, state) || !ReadMemory(mTask, GetSp(state) + 1, &flagsHigh, 1))
+            return;
+        flagsHigh &= ~1;
+        WriteMemory(mTask, GetSp(state) + 1, &flagsHigh, 1);
+#else
+        (void)thread;
+#endif
     }
 
     void Debugger::finishStepOff()
@@ -401,6 +527,8 @@ namespace MachBug
                 SetSingleStep(thread->port, false);
         }
         mStepTid = 0;
+        mStepOver.reset();
+        mPushFlagsTid = 0;
         restoreExceptionPorts();
 
         // Requests that reached our port before the handlers were restored still wait for us.

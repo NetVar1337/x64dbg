@@ -42,6 +42,7 @@ list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
 catch_discover_tests(MachBug_tests)
 add_dependencies(MachBug_tests
+    machbug_fixture_step_over_target
     machbug_fixture_attach_target
     machbug_fixture_exit_code_42
     machbug_fixture_run_endlessly
@@ -117,4 +118,10 @@ properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
 type = "machbug_fixture"
 sources = ["targets/attach_target.c"]
 properties.OUTPUT_NAME = "attach_target"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_step_over_target]
+type = "machbug_fixture"
+sources = ["targets/step_over_target.c"]
+properties.OUTPUT_NAME = "step_over_target"
 properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
