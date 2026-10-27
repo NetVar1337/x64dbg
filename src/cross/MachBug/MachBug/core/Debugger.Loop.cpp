@@ -49,6 +49,11 @@ namespace MachBug
             }
 
             const Command command = waitForCommand();
+            if(command == Command::Detach)
+            {
+                detachProcess();
+                return;
+            }
             if(command == Command::Stop)
                 killProcess();
             else
@@ -61,10 +66,13 @@ namespace MachBug
         std::unique_lock lock(mCommandMutex);
         mCommandCv.wait(lock, [this]
         {
-            return mCommand != Command::None || mStopRequested.load(std::memory_order_acquire);
+            return mCommand != Command::None || mStopRequested.load(std::memory_order_acquire) ||
+                    mDetachRequested.load(std::memory_order_acquire);
         });
         if(mStopRequested.load(std::memory_order_acquire))
             mCommand = Command::Stop;
+        else if(mDetachRequested.load(std::memory_order_acquire))
+            mCommand = Command::Detach;
         // Cleared under the lock so a late Continue cannot queue a command for the next stop.
         mPaused.store(false, std::memory_order_release);
         return mCommand;
@@ -100,6 +108,11 @@ namespace MachBug
                 return false;
             if(mStopRequested.load(std::memory_order_acquire))
                 killProcess();
+            if(!mKilled && mDetachRequested.load(std::memory_order_acquire))
+            {
+                detachProcess();
+                return false;
+            }
 
             ExceptionMessage received;
             if(ReceiveException(mExceptionPort, kPollIntervalMs, received))
@@ -122,7 +135,12 @@ namespace MachBug
 
             // A thread that exits while stepping off never reports the step; release the others.
             if(mStepOff && !threadAlive(mStepOff->tid))
+            {
+                // Code is only patched while nothing runs.
+                suspendTask();
                 finishStepOff();
+                resumeTask();
+            }
         }
     }
 
@@ -203,7 +221,10 @@ namespace MachBug
                 // Discarded on resume: the SIGSTOP is the debugger's, not the program's.
                 mPending = PendingReply{message, KERN_SUCCESS, 0};
                 stopAt(tid);
-                cbSystemBreakpoint();
+                if(mLaunched)
+                    cbSystemBreakpoint();
+                else
+                    cbAttachBreakpoint();
                 return true;
             }
             const auto forwarded = mForwardedSignals.find(tid);
@@ -363,6 +384,72 @@ namespace MachBug
                    mPending->signal);
         ReplyException(mPending->message, mPending->result);
         mPending.reset();
+    }
+
+    void Debugger::detachProcess()
+    {
+        mDetachRequested.store(false, std::memory_order_release);
+        suspendTask();
+        finishStepOff();
+        {
+            // Nothing may trap once the process runs on its own.
+            std::lock_guard lock(mStateMutex);
+            for(const auto & [address, bp] : mBreakpoints)
+                WriteMemory(mTask, address, bp.original.data(), kBreakpointSize);
+            mBreakpoints.clear();
+            if(const Thread* thread = findThread(mStepTid))
+                SetSingleStep(thread->port, false);
+        }
+        mStepTid = 0;
+        restoreExceptionPorts();
+
+        // Requests that reached our port before the handlers were restored still wait for us.
+        ExceptionMessage message;
+        while(ReceiveException(mExceptionPort, 0, message))
+            mQueued.push_back(message);
+        replyPending();
+        for(auto & queued : mQueued)
+            answerUnreported(queued);
+        mQueued.clear();
+
+        if(ptrace(PT_DETACH, Pid(), reinterpret_cast<caddr_t>(1), 0) != 0)
+            cbInternalError("PT_DETACH failed: " + std::string(strerror(errno)));
+        resumeTask();
+        if(mLaunched)
+            mDetachedChildren.push_back(Pid());
+        mPaused.store(false, std::memory_order_release);
+        cbDetach();
+    }
+
+    // Lets a request go as if no debugger had been attached when it was raised.
+    void Debugger::answerUnreported(ExceptionMessage & message)
+    {
+        if(isSoftSignal(message))
+        {
+            const int signal = static_cast<int>(message.code[1]);
+            ptrace(PT_THUPDATE, Pid(), reinterpret_cast<caddr_t>(static_cast<uintptr_t>(message.thread)),
+                   mAwaitingAttachStop && signal == SIGSTOP ? 0 : signal);
+            ReplyException(message, KERN_SUCCESS);
+            return;
+        }
+        if(message.exception != EXC_BREAKPOINT)
+        {
+            ReplyException(message, KERN_FAILURE);
+            return;
+        }
+        // x86 reports a removed int3 with the pc past it.
+        ThreadState state = {};
+        uint8_t bytes[kBreakpointSize] = {};
+        if(!IsSingleStepTrap(message.code, message.codeCount) && ReadThreadState(message.thread, state))
+        {
+            const ptr address = TrapAddress(GetPc(state));
+            if(ReadMemory(mTask, address, bytes, sizeof(bytes)) && !IsTrapInstruction(bytes, sizeof(bytes)))
+            {
+                SetPc(state, address);
+                WriteThreadState(message.thread, state);
+            }
+        }
+        ReplyException(message, KERN_SUCCESS);
     }
 
     void Debugger::killProcess()

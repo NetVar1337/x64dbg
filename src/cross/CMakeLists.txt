@@ -384,6 +384,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Darwin") # macos
 		"MachBug/MachBug/process/Image.h"
 		"MachBug/MachBug/process/Memory.cpp"
 		"MachBug/MachBug/process/Memory.h"
+		"MachBug/MachBug/process/ProcessList.cpp"
+		"MachBug/MachBug/process/ProcessList.h"
 		"MachBug/MachBug/thread/Arch.cpp"
 		"MachBug/MachBug/thread/Arch.h"
 		cmake.toml

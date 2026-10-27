@@ -20,6 +20,10 @@ namespace MachBug
         constexpr exception_mask_t kExceptionMask = EXC_MASK_BREAKPOINT | EXC_MASK_BAD_ACCESS |
             EXC_MASK_BAD_INSTRUCTION | EXC_MASK_ARITHMETIC | EXC_MASK_SOFTWARE;
 
+        constexpr const char* kTaskAccessHint =
+            "run as root, or sign the debugger with the com.apple.security.cs.debugger entitlement; "
+            "Apple's own binaries and hardened apps without get-task-allow cannot be debugged";
+
         uint64_t threadId(const thread_act_t port)
         {
             thread_identifier_info_data_t info = {};
@@ -35,12 +39,13 @@ namespace MachBug
     Debugger::~Debugger()
     {
         const pid_t pid = mPid.load(std::memory_order_acquire);
-        if(pid > 0 && !mExited)
+        if(pid > 0 && !mExited && mLaunched)
         {
             killProcess();
             waitpid(pid, nullptr, 0);
         }
         endSession();
+        reapDetachedChildren();
     }
 
     bool Debugger::Init(const char* path, const char* const* argv, const char* workingDirectory)
@@ -52,6 +57,7 @@ namespace MachBug
         }
 
         mHasLaunchArgs = false;
+        mAttachPid = 0;
         if(!path)
         {
             cbInternalError("cannot launch: no path");
@@ -90,11 +96,36 @@ namespace MachBug
         return true;
     }
 
+    bool Debugger::Attach(const pid_t processId)
+    {
+        const std::string target = "cannot attach to pid " + std::to_string(processId) + ": ";
+        if(mIsRunning.load(std::memory_order_acquire))
+        {
+            cbInternalError(target + "the debug loop is still running");
+            return false;
+        }
+
+        mHasLaunchArgs = false;
+        mAttachPid = 0;
+        if(processId <= 0 || processId == getpid())
+        {
+            cbInternalError(target + "not a debuggable process");
+            return false;
+        }
+        if(kill(processId, 0) != 0 && errno == ESRCH)
+        {
+            cbInternalError(target + "no such process");
+            return false;
+        }
+        mAttachPid = processId;
+        return true;
+    }
+
     void Debugger::Start()
     {
-        if(!mHasLaunchArgs)
+        if(!mHasLaunchArgs && mAttachPid == 0)
         {
-            cbInternalError("Start called without Init");
+            cbInternalError("Start called without Init or Attach");
             return;
         }
         if(mIsRunning.exchange(true, std::memory_order_acq_rel))
@@ -102,25 +133,30 @@ namespace MachBug
             cbInternalError("Start called while the debug loop is running");
             return;
         }
+        const bool attaching = mAttachPid != 0;
         mHasLaunchArgs = false;
 
-        if(launch())
+        beginSession();
+        if(attaching ? attach() : launch())
             debugLoop();
         endSession();
         mIsRunning.store(false, std::memory_order_release);
     }
 
-    bool Debugger::launch()
+    void Debugger::beginSession()
     {
+        reapDetachedChildren();
         mExited = false;
         mKilled = false;
         mStopRequested.store(false, std::memory_order_release);
         mPauseRequested.store(false, std::memory_order_release);
-        {
-            std::lock_guard lock(mCommandMutex);
-            mCommand = Command::None;
-        }
+        mDetachRequested.store(false, std::memory_order_release);
+        std::lock_guard lock(mCommandMutex);
+        mCommand = Command::None;
+    }
 
+    bool Debugger::launch()
+    {
         posix_spawnattr_t attr;
         posix_spawnattr_init(&attr);
         // Suspended before dyld runs, and in its own process group like a shell job.
@@ -146,6 +182,7 @@ namespace MachBug
             return false;
         }
         mPid.store(pid, std::memory_order_release);
+        mLaunched = true;
 
         const auto fail = [&](const std::string & error)
         {
@@ -160,14 +197,10 @@ namespace MachBug
         if(kr != KERN_SUCCESS)
         {
             mTask = MACH_PORT_NULL;
-            return fail(std::string("task_for_pid failed: ") + mach_error_string(kr) +
-                        " (run as root, or sign the debugger with the com.apple.security.cs.debugger entitlement)");
+            return fail(std::string("task_for_pid failed: ") + mach_error_string(kr) + " (" + kTaskAccessHint + ")");
         }
 
-        if(mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &mExceptionPort) != KERN_SUCCESS ||
-                mach_port_insert_right(mach_task_self(), mExceptionPort, mExceptionPort, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS ||
-                task_set_exception_ports(mTask, kExceptionMask, mExceptionPort, EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES,
-                                         THREAD_STATE_NONE) != KERN_SUCCESS)
+        if(!installExceptionPort())
             return fail("cannot set the exception port of pid " + std::to_string(pid));
 
         // Signals now arrive as EXC_SOFT_SIGNAL, and the process may run patched code pages.
@@ -177,6 +210,69 @@ namespace MachBug
             return fail(std::string("PT_ATTACHEXC failed: ") + strerror(errno));
         mAwaitingAttachStop = true;
         return true;
+    }
+
+    bool Debugger::attach()
+    {
+        const pid_t pid = mAttachPid;
+        mAttachPid = 0;
+        const std::string target = "cannot attach to pid " + std::to_string(pid) + ": ";
+
+        const kern_return_t kr = task_for_pid(mach_task_self(), pid, &mTask);
+        if(kr != KERN_SUCCESS)
+        {
+            mTask = MACH_PORT_NULL;
+            cbInternalError(target + "task_for_pid failed: " + mach_error_string(kr) + " (" + kTaskAccessHint + ")");
+            return false;
+        }
+        if(!installExceptionPort())
+        {
+            cbInternalError(target + "cannot set its exception port");
+            return false;
+        }
+        // Signals now arrive as EXC_SOFT_SIGNAL; the SIGSTOP it queues becomes the attach stop.
+        if(ptrace(PT_ATTACHEXC, pid, nullptr, 0) != 0)
+        {
+            const int error = errno;
+            restoreExceptionPorts();
+            cbInternalError(target + (error == EBUSY ? std::string("it is already being debugged")
+                                      : std::string("PT_ATTACHEXC failed: ") + strerror(error)));
+            return false;
+        }
+        mPid.store(pid, std::memory_order_release);
+        mLaunched = false;
+        mAwaitingAttachStop = true;
+        return true;
+    }
+
+    bool Debugger::installExceptionPort()
+    {
+        mOriginalPorts.count = EXC_TYPES_COUNT;
+        if(task_get_exception_ports(mTask, kExceptionMask, mOriginalPorts.masks, &mOriginalPorts.count, mOriginalPorts.ports,
+                                    mOriginalPorts.behaviors, mOriginalPorts.flavors) != KERN_SUCCESS)
+            mOriginalPorts.count = 0;
+        return mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &mExceptionPort) == KERN_SUCCESS &&
+               mach_port_insert_right(mach_task_self(), mExceptionPort, mExceptionPort, MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS &&
+               task_set_exception_ports(mTask, kExceptionMask, mExceptionPort, EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES,
+                                        THREAD_STATE_NONE) == KERN_SUCCESS;
+    }
+
+    void Debugger::restoreExceptionPorts()
+    {
+        // Masks without a handler stay pointed at our port otherwise.
+        task_set_exception_ports(mTask, kExceptionMask, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+        for(mach_msg_type_number_t i = 0; i < mOriginalPorts.count; ++i)
+            task_set_exception_ports(mTask, mOriginalPorts.masks[i], mOriginalPorts.ports[i], mOriginalPorts.behaviors[i],
+                                     mOriginalPorts.flavors[i]);
+    }
+
+    void Debugger::reapDetachedChildren()
+    {
+        std::erase_if(mDetachedChildren, [](const pid_t pid)
+        {
+            const pid_t reaped = waitpid(pid, nullptr, WNOHANG);
+            return reaped == pid || (reaped == -1 && errno == ECHILD);
+        });
     }
 
     void Debugger::endSession()
@@ -205,6 +301,14 @@ namespace MachBug
         mStepTid = 0;
         mNextThreadNumber = 0;
         mAwaitingAttachStop = false;
+        mLaunched = false;
+        mDetachRequested.store(false, std::memory_order_release);
+        for(mach_msg_type_number_t i = 0; i < mOriginalPorts.count; ++i)
+        {
+            if(MACH_PORT_VALID(mOriginalPorts.ports[i]))
+                mach_port_deallocate(mach_task_self(), mOriginalPorts.ports[i]);
+        }
+        mOriginalPorts.count = 0;
         if(mExceptionPort != MACH_PORT_NULL)
         {
             mach_port_deallocate(mach_task_self(), mExceptionPort);
@@ -251,6 +355,17 @@ namespace MachBug
             return false;
         std::lock_guard lock(mCommandMutex);
         mStopRequested.store(true, std::memory_order_release);
+        mCommandCv.notify_all();
+        return true;
+    }
+
+    bool Debugger::Detach()
+    {
+        if(!mIsRunning.load(std::memory_order_acquire) || Pid() <= 0)
+            return false;
+        std::lock_guard lock(mCommandMutex);
+        if(mDetachRequested.exchange(true, std::memory_order_acq_rel))
+            return false;
         mCommandCv.notify_all();
         return true;
     }
@@ -486,6 +601,8 @@ namespace MachBug
     void Debugger::cbCreateThread(uint64_t) {}
     void Debugger::cbExitThread(uint64_t) {}
     void Debugger::cbSystemBreakpoint() {}
+    void Debugger::cbAttachBreakpoint() {}
+    void Debugger::cbDetach() {}
     void Debugger::cbBreakpoint(ptr) {}
     void Debugger::cbStep() {}
     void Debugger::cbPaused() {}

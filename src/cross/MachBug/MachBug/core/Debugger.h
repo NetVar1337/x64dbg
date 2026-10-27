@@ -17,8 +17,8 @@
 
 namespace MachBug
 {
-    // Debugs one launched process through its Mach exception port. Every stop suspends the
-    // whole task, so a reported stop freezes all threads.
+    // Debugs one launched or attached process through its Mach exception port. Every stop
+    // suspends the whole task, so a reported stop freezes all threads.
     class Debugger
     {
     public:
@@ -29,11 +29,13 @@ namespace MachBug
         Debugger & operator=(const Debugger &) = delete;
 
         bool Init(const char* path, const char* const* argv = nullptr, const char* workingDirectory = nullptr);
-        void Start();    // Blocks - runs the debug loop until the process is gone
+        bool Attach(pid_t processId);
+        void Start();    // Blocks - runs the debug loop until the process is gone or detached
         void Continue(); // Thread-safe
         void StepInto(); // Thread-safe
         void Pause();    // Thread-safe
         bool Stop();     // Thread-safe
+        bool Detach();   // Thread-safe
 
         [[nodiscard]] bool IsPaused() const { return mPaused.load(std::memory_order_acquire); }
         [[nodiscard]] pid_t Pid() const { return mPid.load(std::memory_order_acquire); }
@@ -63,6 +65,8 @@ namespace MachBug
         virtual void cbCreateThread(uint64_t tid);
         virtual void cbExitThread(uint64_t tid);
         virtual void cbSystemBreakpoint();
+        virtual void cbAttachBreakpoint();
+        virtual void cbDetach();
         virtual void cbBreakpoint(ptr address);
         virtual void cbStep();
         virtual void cbPaused();
@@ -89,6 +93,7 @@ namespace MachBug
             Continue,
             StepInto,
             Stop,
+            Detach,
         };
 
         // What to do with the exception that caused the current stop when the thread resumes.
@@ -106,7 +111,14 @@ namespace MachBug
             std::vector<thread_act_t> held;
         };
 
+        void beginSession();
         bool launch();
+        bool attach();
+        bool installExceptionPort();
+        void restoreExceptionPorts();
+        void detachProcess();
+        void answerUnreported(ExceptionMessage & message);
+        void reapDetachedChildren();
         void debugLoop();
         void endSession();
         bool nextEvent(std::optional<ExceptionMessage> & message);
@@ -135,11 +147,16 @@ namespace MachBug
         std::vector<std::string> mArgv;
         std::string mCwd;
         bool mHasLaunchArgs = false;
+        pid_t mAttachPid = 0;
+        bool mLaunched = false;
+        // Detached children are still ours to reap once they exit.
+        std::vector<pid_t> mDetachedChildren;
 
         std::atomic<bool> mIsRunning{false};
         std::atomic<bool> mPaused{false};
         std::atomic<bool> mPauseRequested{false};
         std::atomic<bool> mStopRequested{false};
+        std::atomic<bool> mDetachRequested{false};
         std::atomic<pid_t> mPid{0};
         bool mExited = false;
         bool mKilled = false;
@@ -147,6 +164,15 @@ namespace MachBug
 
         task_t mTask = MACH_PORT_NULL;
         mach_port_t mExceptionPort = MACH_PORT_NULL;
+        // The handlers the process had, restored on detach.
+        struct
+        {
+            exception_mask_t masks[EXC_TYPES_COUNT] = {};
+            mach_port_t ports[EXC_TYPES_COUNT] = {};
+            exception_behavior_t behaviors[EXC_TYPES_COUNT] = {};
+            thread_state_flavor_t flavors[EXC_TYPES_COUNT] = {};
+            mach_msg_type_number_t count = 0;
+        } mOriginalPorts;
         bool mTaskSuspended = false;
         // PT_ATTACHEXC queues a SIGSTOP; it is not the program's.
         bool mAwaitingAttachStop = false;

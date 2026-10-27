@@ -31,6 +31,8 @@ namespace MachBug::test
         CreateThread,
         ExitThread,
         SystemBreakpoint,
+        AttachBreakpoint,
+        Detach,
         Breakpoint,
         Step,
         Paused,
@@ -151,6 +153,16 @@ namespace MachBug::test
             record({EventType::SystemBreakpoint, 0, 0, 0, Pc()});
         }
 
+        void cbAttachBreakpoint() override
+        {
+            record({EventType::AttachBreakpoint, 0, 0, 0, Pc()});
+        }
+
+        void cbDetach() override
+        {
+            record({EventType::Detach});
+        }
+
         void cbBreakpoint(const ptr address) override
         {
             record({EventType::Breakpoint, 0, address, 0, Pc()});
@@ -187,7 +199,7 @@ namespace MachBug::test
         std::string describe() const
         {
             static const char* names[] = {"CreateProcess", "ExitProcess", "CreateThread", "ExitThread", "SystemBreakpoint",
-                                          "Breakpoint", "Step", "Paused", "Exception", "InternalError"
+                                          "AttachBreakpoint", "Detach", "Breakpoint", "Step", "Paused", "Exception", "InternalError"
                                          };
             std::ostringstream out;
             for(const auto & event : mEvents)
