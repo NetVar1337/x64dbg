@@ -1,0 +1,112 @@
+# Reference: https://build-cpp.github.io/cmkr/cmake-toml
+[cmake]
+version = "3.19"
+cmkr-include = false
+
+[project]
+name = "MachBug_tests"
+# Nothing here uses Qt, and its autogen would make the C fixtures link as C++.
+cmake-after = """
+set(CMAKE_AUTOMOC OFF)
+set(CMAKE_AUTOUIC OFF)
+set(CMAKE_AUTORCC OFF)
+"""
+
+[fetch-content.Catch2]
+git = "https://github.com/catchorg/Catch2"
+tag = "v3.14.0"
+shallow = true
+
+[target.MachBug_tests]
+type = "executable"
+sources = [
+    "test_breakpoints.cpp",
+    "test_lifecycle.cpp",
+    "test_signals.cpp",
+    "test_stepping.cpp",
+    "test_threads.cpp",
+]
+headers = [
+    "TestHarness.h",
+    "targets/TargetUtil.h",
+]
+link-libraries = ["MachBug", "Catch2::Catch2WithMain"]
+compile-features = ["cxx_std_20"]
+compile-definitions = ['MACHBUG_TESTS_TARGETS_DIR="${CMAKE_BINARY_DIR}/tests/targets"']
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests"
+# The per-file helper namespaces would collide if these were concatenated.
+properties.UNITY_BUILD = false
+cmake-after = """
+list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
+include(Catch)
+catch_discover_tests(MachBug_tests)
+add_dependencies(MachBug_tests
+    machbug_fixture_exit_code_42
+    machbug_fixture_run_endlessly
+    machbug_fixture_steps
+    machbug_fixture_hit_threads
+    machbug_fixture_threads_spin
+    machbug_fixture_patch_target
+    machbug_fixture_segfault
+    machbug_fixture_signal_handler
+    machbug_fixture_trap
+)
+"""
+
+[template.machbug_fixture]
+type = "executable"
+compile-options = ["-g", "-O0"]
+
+[target.machbug_fixture_exit_code_42]
+type = "machbug_fixture"
+sources = ["targets/exit_code_42.c"]
+properties.OUTPUT_NAME = "exit_code_42"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_run_endlessly]
+type = "machbug_fixture"
+sources = ["targets/run_endlessly.c"]
+properties.OUTPUT_NAME = "run_endlessly"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_steps]
+type = "machbug_fixture"
+sources = ["targets/steps.c"]
+properties.OUTPUT_NAME = "steps"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_hit_threads]
+type = "machbug_fixture"
+sources = ["targets/hit_threads.c"]
+properties.OUTPUT_NAME = "hit_threads"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_threads_spin]
+type = "machbug_fixture"
+sources = ["targets/threads_spin.c"]
+properties.OUTPUT_NAME = "threads_spin"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_patch_target]
+type = "machbug_fixture"
+sources = ["targets/patch_target.c"]
+properties.OUTPUT_NAME = "patch_target"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_segfault]
+type = "machbug_fixture"
+sources = ["targets/segfault.c"]
+properties.OUTPUT_NAME = "segfault"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_signal_handler]
+type = "machbug_fixture"
+sources = ["targets/signal_handler.c"]
+properties.OUTPUT_NAME = "signal_handler"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"
+
+[target.machbug_fixture_trap]
+type = "machbug_fixture"
+sources = ["targets/trap.c"]
+properties.OUTPUT_NAME = "trap"
+properties.RUNTIME_OUTPUT_DIRECTORY = "${CMAKE_BINARY_DIR}/tests/targets"

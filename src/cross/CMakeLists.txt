@@ -29,6 +29,7 @@ option(LIBPL_ENABLE_CLI "" OFF)
 option(LIBPL_ENABLE_TESTS "" OFF)
 option(LIBWOLV_ENABLE_TESTS "" OFF)
 option(ELFBUG_BUILD_TESTS "" OFF)
+option(MACHBUG_BUILD_TESTS "" OFF)
 
 project(cross
 	LANGUAGES
@@ -41,6 +42,9 @@ include("widgets/Qt.cmake")
 
 if(ELFBUG_BUILD_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
         AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    enable_testing()
+endif()
+if(MACHBUG_BUILD_TESTS AND APPLE)
     enable_testing()
 endif()
 
@@ -76,6 +80,18 @@ if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86
 		set(CMAKE_FOLDER "ElfBug/tests")
 	endif()
 	add_subdirectory("ElfBug/tests")
+	set(CMAKE_FOLDER ${CMKR_CMAKE_FOLDER})
+
+endif()
+if(APPLE AND MACHBUG_BUILD_TESTS) # machbug-tests
+	# Subdirectory: MachBug/tests
+	set(CMKR_CMAKE_FOLDER ${CMAKE_FOLDER})
+	if(CMAKE_FOLDER)
+		set(CMAKE_FOLDER "${CMAKE_FOLDER}/MachBug/tests")
+	else()
+		set(CMAKE_FOLDER "MachBug/tests")
+	endif()
+	add_subdirectory("MachBug/tests")
 	set(CMAKE_FOLDER ${CMKR_CMAKE_FOLDER})
 
 endif()
@@ -354,5 +370,36 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_
 	if(NOT CMKR_VS_STARTUP_PROJECT)
 		set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT debugger)
 	endif()
+
+endif()
+# Target: MachBug
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin") # macos
+	set(MachBug_SOURCES
+		"MachBug/MachBug/core/Debugger.Loop.cpp"
+		"MachBug/MachBug/core/Debugger.cpp"
+		"MachBug/MachBug/core/Debugger.h"
+		"MachBug/MachBug/core/ExceptionMessage.cpp"
+		"MachBug/MachBug/core/ExceptionMessage.h"
+		"MachBug/MachBug/process/Image.cpp"
+		"MachBug/MachBug/process/Image.h"
+		"MachBug/MachBug/process/Memory.cpp"
+		"MachBug/MachBug/process/Memory.h"
+		"MachBug/MachBug/thread/Arch.cpp"
+		"MachBug/MachBug/thread/Arch.h"
+		cmake.toml
+	)
+
+	add_library(MachBug STATIC)
+
+	target_sources(MachBug PRIVATE ${MachBug_SOURCES})
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${MachBug_SOURCES})
+
+	target_compile_features(MachBug PUBLIC
+		cxx_std_20
+	)
+
+	target_include_directories(MachBug PUBLIC
+		MachBug
+	)
 
 endif()

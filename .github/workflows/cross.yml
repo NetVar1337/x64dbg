@@ -22,6 +22,8 @@ jobs:
           # Qt 6.8 links the AGL framework, which the current Xcode SDK no longer ships
           - platform: macos-latest
             qt: 6.11.3
+          - platform: macos-15-intel
+            qt: 6.11.3
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout
@@ -46,7 +48,7 @@ jobs:
       - name: Build
         run: |
           cd src/cross
-          cmake -B build -G Ninja -DCMAKE_UNITY_BUILD=ON -DELFBUG_BUILD_TESTS=ON
+          cmake -B build -G Ninja -DCMAKE_UNITY_BUILD=ON -DELFBUG_BUILD_TESTS=ON -DMACHBUG_BUILD_TESTS=ON
           cmake --build build
 
       - name: Test ElfBug
@@ -55,6 +57,24 @@ jobs:
           sudo sysctl -w kernel.yama.ptrace_scope=0
           cd src/cross/build
           ctest --output-on-failure --no-tests=error --timeout 120
+
+      - name: Test MachBug
+        if: ${{ startsWith(matrix.platform, 'macos') }}
+        run: |
+          # task_for_pid needs root without a GUI session to authorize the debugger
+          cd src/cross/build
+          sudo ctest --output-on-failure --no-tests=error --timeout 120
+          # Concurrent breakpoint hits are where stepping-off races show up
+          sudo ctest --output-on-failure --timeout 120 -R "several threads" --repeat until-fail:50
+
+      - name: Test MachBug (ThreadSanitizer)
+        if: ${{ matrix.platform == 'macos-latest' }}
+        run: |
+          cd src/cross
+          cmake -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DMACHBUG_BUILD_TESTS=ON -DCMAKE_CXX_FLAGS=-fsanitize=thread -DFETCHCONTENT_BASE_DIR=$PWD/build/_deps
+          cmake --build build-tsan --target MachBug_tests
+          cd build-tsan
+          sudo env TSAN_OPTIONS=halt_on_error=1 ctest --output-on-failure --no-tests=error --timeout 120
 
   appimage:
     # Skip building pull requests from the same repository
